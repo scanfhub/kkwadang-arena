@@ -17,6 +17,7 @@ const DASH_SPEED = 820, DASH_CD = 1.4, DASH_TIME = 0.22, DASH_STEPS = Math.round
 const RESTITUTION = 1.25;
 const MAX_PLAYERS = 8;
 const COUNTDOWN = 3, ROUNDOVER = 4;
+const MAX_INPUT_BUF = 12, TARGET_INPUT_BUF = 2; // 입력 버퍼: 12개(200ms) 넘게 밀리면 최근 2개만 남기고 건너뜀
 
 const server = http.createServer((req, res) => {
   if (req.url === '/' || req.url.startsWith('/?')) {
@@ -111,6 +112,27 @@ function step() {
   } else if (phase === 'roundover') {
     phaseT -= DT;
     if (phaseT <= 0) setPhase(count >= 2 ? 'countdown' : 'lobby');
+  }
+
+  // ---- 입력 버퍼 소비: 프레임 번호 순서대로 틱마다 정확히 1개 (Overwatch·Rocket League 방식) ----
+  // 제때 안 온 번호는 '직전 키를 계속 누르고 있다'고 가정해 처리하고, 그 번호를 처리했다고 알린다 → 클라이언트 보정이 같은 프레임끼리 비교됨
+  for (const p of players.values()) {
+    if (!p.inq) continue;
+    if (p.inq.size > MAX_INPUT_BUF) {
+      const keep = [...p.inq.keys()].sort((a, b) => a - b).slice(-TARGET_INPUT_BUF);
+      for (const k of p.inq.keys()) if (k < keep[0]) p.inq.delete(k);
+      p.nextQ = keep[0];
+    }
+    const q = p.nextQ++, inp = p.inq.get(q);
+    p.inq.delete(q);
+    let dash = null;
+    if (inp) { p.ix = inp.x; p.iy = inp.y; if (inp.d) dash = { q, x: inp.x, y: inp.y }; }
+    if (!dash && p.lateDash) dash = p.lateDash; // 추정으로 이미 지나간 프레임에 있던 대시는 지금 반영
+    p.lateDash = null;
+    if (dash && (!p.lastDashQ || dash.q - p.lastDashQ >= DASH_STEPS)) {
+      p.wantDash = true; p.dashQ = dash.q; p.dashX = dash.x; p.dashY = dash.y;
+    }
+    p.q = q; p.bf = p.inq.size;
   }
 
   const frozen = phase === 'countdown' || phase === 'roundover';
@@ -219,7 +241,7 @@ function step() {
     broadcast({
       t: 's', tm: Math.round(performance.now()), ph: phase, pt: Math.max(0, Math.round(phaseT * 10) / 10), ar: Math.round(arenaR),
       p: [...players.values()].map(p => ({
-        i: p.id, n: p.name, c: p.color, x: Math.round(p.x), y: Math.round(p.y), vx: Math.round(p.vx), vy: Math.round(p.vy), q: p.q,
+        i: p.id, n: p.name, c: p.color, x: Math.round(p.x), y: Math.round(p.y), vx: Math.round(p.vx), vy: Math.round(p.vy), q: p.q, bf: p.bf,
         r: radius(p), s: p.inRound ? p.state : 2, f: Math.round(p.face * 100) / 100,
         d: p.dashT > 0 ? 1 : 0, cd: Math.max(0, Math.round(p.dashCd / DASH_CD * 100) / 100),
         sc: p.score, ko: p.kos, ft: Math.round(p.fallT * 100) / 100,
@@ -228,7 +250,14 @@ function step() {
     });
   }
 }
-setInterval(step, 1000 / TICK);
+// 정확히 초당 60틱: 다음 틱 예정 시각 기준으로 돌리고, 밀리면 따라잡음 (0.25초 넘게 밀리면 포기하고 현재 시각부터)
+let nextTickAt = performance.now();
+(function loop() {
+  const now = performance.now();
+  if (now - nextTickAt > 250) nextTickAt = now;
+  while (nextTickAt <= now) { step(); nextTickAt += 1000 / TICK; }
+  setTimeout(loop, Math.max(0, nextTickAt - performance.now()));
+})();
 
 wss.on('connection', (ws) => {
   let me = null;
@@ -244,16 +273,15 @@ wss.on('connection', (ws) => {
       ws.send(JSON.stringify({ t: 'welcome', id: me.id }));
       event('join', { n: name });
     } else if (me && m.t === 'in') {
-      me.ix = Math.max(-1, Math.min(1, +m.x || 0));
-      me.iy = Math.max(-1, Math.min(1, +m.y || 0));
-      const q = m.q | 0;
-      if (m.d) {
-        if (!q) { me.wantDash = true; me.dashQ = 0; } // 번호 없는 입력(봇 등): 기존 방식
-        else if (!me.wantDash && (!me.lastDashQ || q - me.lastDashQ >= DASH_STEPS)) {
-          me.wantDash = true; me.dashQ = q; me.dashX = me.ix; me.dashY = me.iy;
-        }
+      const x = Math.max(-1, Math.min(1, +m.x || 0)), y = Math.max(-1, Math.min(1, +m.y || 0)), q = m.q | 0;
+      if (!q) { // 번호 없는 입력(봇 등): 받는 즉시 반영
+        me.ix = x; me.iy = y;
+        if (m.d) { me.wantDash = true; me.dashQ = 0; }
+        return;
       }
-      if (q) me.q = q;
+      if (!me.inq) { me.inq = new Map(); me.nextQ = q; }
+      if (q >= me.nextQ) me.inq.set(q, { x, y, d: m.d ? 1 : 0 });
+      else if (m.d) me.lateDash = { q, x, y };
     }
   });
   ws.on('close', () => {
