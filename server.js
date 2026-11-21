@@ -210,7 +210,7 @@ function step() {
   // ---- 상태 전송 ----
   if (++tickN % SEND_EVERY === 0) {
     broadcast({
-      t: 's', ph: phase, pt: Math.max(0, Math.round(phaseT * 10) / 10), ar: Math.round(arenaR),
+      t: 's', tm: Math.round(performance.now()), ph: phase, pt: Math.max(0, Math.round(phaseT * 10) / 10), ar: Math.round(arenaR),
       p: [...players.values()].map(p => ({
         i: p.id, n: p.name, c: p.color, x: Math.round(p.x), y: Math.round(p.y),
         r: radius(p), s: p.inRound ? p.state : 2, f: Math.round(p.face * 100) / 100,
