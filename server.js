@@ -23,12 +23,16 @@ const server = http.createServer((req, res) => {
   if (req.url === '/' || req.url.startsWith('/?')) {
     res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-cache' });
     res.end(fs.readFileSync(HTML_PATH));
+  } else if (req.url === '/stats') { // 접속자별 회선 기록 (실전 테스트 분석용)
+    res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-cache' });
+    res.end(JSON.stringify(netLog));
   } else { res.writeHead(404); res.end(); }
 });
 const wss = new WebSocketServer({ server });
 
 let nextId = 1, time = 0, tickN = 0;
 const players = new Map(); // id -> player
+const netLog = []; // 접속자별 회선 기록, 최근 500줄
 let phase = 'lobby', phaseT = 0, arenaR = ARENA_R0, roundT = 0;
 let powerups = [], nextPowerAt = 5, nextPuId = 1;
 
@@ -133,6 +137,7 @@ function step() {
       p.wantDash = true; p.dashQ = dash.q; p.dashX = dash.x; p.dashY = dash.y;
     }
     p.q = q; p.bf = p.inq.size;
+    p.nsBf = (p.nsBf || 0) + p.bf; p.nsTicks = (p.nsTicks || 0) + 1; if (!inp) p.nsGuess = (p.nsGuess || 0) + 1;
   }
 
   const frozen = phase === 'countdown' || phase === 'roundover';
@@ -279,9 +284,25 @@ wss.on('connection', (ws) => {
         if (m.d) { me.wantDash = true; me.dashQ = 0; }
         return;
       }
+      const now = Date.now();
+      if (me.nsLastIn) { const g = now - me.nsLastIn; if (g > 100) me.nsUpGaps = (me.nsUpGaps || 0) + 1; me.nsUpMax = Math.max(me.nsUpMax || 0, g); }
+      me.nsLastIn = now;
       if (!me.inq) { me.inq = new Map(); me.nextQ = q; }
       if (q >= me.nextQ) me.inq.set(q, { x, y, d: m.d ? 1 : 0 });
-      else if (m.d) me.lateDash = { q, x, y };
+      else { me.nsLate = (me.nsLate || 0) + 1; if (m.d) me.lateDash = { q, x, y }; }
+    } else if (me && m.t === 'ping') {
+      ws.send(JSON.stringify({ t: 'pong', c: m.c }));
+    } else if (me && m.t === 'nst') { // 클라이언트가 10초마다 보내는 회선 상태 + 서버가 센 값 → 한 줄 기록
+      const num = v => Math.max(0, Math.min(1e6, Math.round(+v || 0)));
+      const line = {
+        t: new Date().toISOString(), 이름: me.name, 인원: players.size,
+        핑평균ms: num(m.ra), 핑최대ms: num(m.rm), 받기끊김: num(m.g), 받기최대끊김ms: num(m.m),
+        보내기끊김: me.nsUpGaps || 0, 보내기최대끊김ms: me.nsUpMax || 0, 추정한프레임: me.nsGuess || 0, 늦은입력: me.nsLate || 0,
+        서버버퍼평균: me.nsTicks ? Math.round(me.nsBf / me.nsTicks * 10) / 10 : null, 보간지연ms: num(m.d), fps: num(m.f),
+      };
+      netLog.push(line); if (netLog.length > 500) netLog.shift();
+      console.log('NET ' + JSON.stringify(line));
+      me.nsUpGaps = me.nsUpMax = me.nsGuess = me.nsLate = me.nsBf = me.nsTicks = 0;
     }
   });
   ws.on('close', () => {

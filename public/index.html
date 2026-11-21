@@ -103,6 +103,7 @@ function addFeed(parts) { feed.push({ parts, t: performance.now() }); if (feed.l
 
 function onMsg(m) {
   if (m.t === 's') { onState(m); return; }
+  if (m.t === 'pong') { net.rtts.push(performance.now() - m.c); return; }
   if (m.t === 'welcome') { myId = m.id; return; }
   if (m.t === 'full') { alert('방이 꽉 찼어요 (최대 8명). 잠시 후 다시 시도하세요.'); return; }
   if (m.t !== 'e') return;
@@ -233,6 +234,8 @@ function reconcile(m) {
 let offSamples = [], lateSamples = [], clockOff = 0, renderDelay = 100;
 function onState(m) {
   const now = performance.now(), off = now - m.tm;
+  if (net.lastAt) { const g = now - net.lastAt; if (g > 100) net.gaps++; net.maxGap = Math.max(net.maxGap, g); }
+  net.lastAt = now;
   if (snaps.length && m.tm < snaps[snaps.length - 1].tm) { snaps = []; offSamples = []; lateSamples = []; } // 서버 재시작
   offSamples.push({ t: now, off });
   while (offSamples[0].t < now - 5000) offSamples.shift();
@@ -243,6 +246,16 @@ function onState(m) {
   latest = m;
   reconcile(m);
 }
+// ---------- 회선 기록 (실전 테스트 분석용, 화면엔 안 보임): 2초마다 핑, 10초마다 상태 보고 ----------
+const net = { gaps: 0, maxGap: 0, lastAt: 0, frames: 0, rtts: [] };
+setInterval(() => { if (ws && ws.readyState === 1 && myId) ws.send(JSON.stringify({ t: 'ping', c: performance.now() })); }, 2000);
+setInterval(() => {
+  if (!ws || ws.readyState !== 1 || !myId) return;
+  const r = net.rtts;
+  ws.send(JSON.stringify({ t: 'nst', g: net.gaps, m: net.maxGap, d: renderDelay, f: net.frames / 10,
+    ra: r.length ? r.reduce((a, b) => a + b, 0) / r.length : 0, rm: r.length ? Math.max(...r) : 0 }));
+  Object.assign(net, { gaps: 0, maxGap: 0, frames: 0, rtts: [] });
+}, 10000);
 function targetDelay() {
   const l = lateSamples.map(o => o.late).sort((a, b) => a - b);
   const p90 = l.length ? l[Math.floor(l.length * .9)] : 60;
@@ -402,7 +415,7 @@ function drawHUD(st, now) {
 
 let lastFrame = performance.now();
 function frame(now) {
-  const raw = (now - lastFrame) / 1000, dt = Math.min(.05, raw); lastFrame = now;
+  const raw = (now - lastFrame) / 1000, dt = Math.min(.05, raw); lastFrame = now; net.frames++;
   simAcc += Math.min(raw, .1) * simRate;
   while (simAcc >= SIM.DT) { simStep(); simAcc -= SIM.DT; }
   const k = Math.exp(-10 * dt); offX *= k; offY *= k;
