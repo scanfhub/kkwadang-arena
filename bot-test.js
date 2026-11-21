@@ -1,19 +1,23 @@
-// 봇 3명이 실제 서버에 접속해 서로 박치기하며 라운드가 끝까지 도는지 확인
+// 봇 3명이 접속해 서로 박치기하며 라운드가 끝까지 도는지 확인
+// P2P 구조라 게임은 방장 브라우저가 돌림 → 브라우저로 먼저 접속해 방장이 된 뒤 실행. 봇은 서버 중계로 방장과 주고받음
 const WebSocket = require('ws');
 const URL = process.argv[2] || 'ws://localhost:3000';
 const log = []; const phases = new Set(); let wins = [], falls = 0, bumps = 0, lastState = null;
 function bot(name) {
-  const ws = new WebSocket(URL); let id = 0;
+  const ws = new WebSocket(URL); let id = 0, host = 0;
   ws.on('open', () => ws.send(JSON.stringify({ t: 'join', name })));
   ws.on('message', raw => {
-    const m = JSON.parse(raw);
-    if (m.t === 'welcome') id = m.id;
+    let m = JSON.parse(raw);
+    if (m.t === 'welcome') { id = m.id; return; }
+    if (m.t === 'host') { host = m.id; return; }
+    if (m.t !== 'rl') return;
+    m = m.d;
     if (m.t === 's' && id) {
       if (name === 'bot1') { phases.add(m.ph); lastState = m; }
       const me = m.p.find(p => p.i === id), others = m.p.filter(p => p.i !== id && p.s === 0);
       if (!me || me.s !== 0 || !others.length) return;
       const t = others[0], dx = t.x - me.x, dy = t.y - me.y, l = Math.hypot(dx, dy) || 1;
-      ws.send(JSON.stringify({ t: 'in', x: dx / l, y: dy / l, d: l < 120 && Math.random() < .3 ? 1 : 0 }));
+      ws.send(JSON.stringify({ t: 'rl', to: host, d: { t: 'in', x: dx / l, y: dy / l, d: l < 120 && Math.random() < .3 ? 1 : 0 } }));
     }
     if (m.t === 'e' && name === 'bot1') {
       if (m.k === 'win') wins.push(m.n || '(무승부)');

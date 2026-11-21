@@ -82,8 +82,8 @@ function join() {
   try { localStorage.setItem('kd-name', name); } catch (e) {}
   try { ac = new (window.AudioContext || window.webkitAudioContext)(); } catch (e) {}
   ws = new WebSocket((location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host);
-  ws.onopen = () => ws.send(JSON.stringify({ t: 'join', name }));
-  ws.onmessage = ev => onMsg(JSON.parse(ev.data));
+  ws.onopen = () => ws.send(JSON.stringify({ t: 'join', name, canHost: !isTouch }));
+  ws.onmessage = ev => onServer(JSON.parse(ev.data));
   ws.onclose = () => { $('dc').style.display = 'flex'; };
   $('join').style.display = 'none'; $('invite').style.display = 'block';
 }
@@ -103,9 +103,7 @@ function addFeed(parts) { feed.push({ parts, t: performance.now() }); if (feed.l
 
 function onMsg(m) {
   if (m.t === 's') { onState(m); return; }
-  if (m.t === 'pong') { net.rtts.push(performance.now() - m.c); return; }
-  if (m.t === 'welcome') { myId = m.id; return; }
-  if (m.t === 'full') { alert('방이 꽉 찼어요 (최대 8명). 잠시 후 다시 시도하세요.'); return; }
+  if (m.t === 'pong') { const r = performance.now() - m.c; net.rtts.push(r); net.rtt = net.rtt ? net.rtt * .7 + r * .3 : r; return; }
   if (m.t !== 'e') return;
   if (m.k === 'bump') {
     const n = Math.min(24, 4 + m.f / 40);
@@ -130,6 +128,95 @@ function onMsg(m) {
     tone(300, .3, 'square', .1, 120);
   } else if (m.k === 'join') addFeed([[m.n, BRAND], [' 님 입장', '#8b92a3']]);
   else if (m.k === 'leave') addFeed([[m.n, '#8b92a3'], [' 님 나감', '#8b92a3']]);
+}
+
+
+// ---------- 연결: 서버(로비·신호·중계) + 방장과 WebRTC P2P(UDP) ----------
+const ICE = [{ urls: 'stun:stun.l.google.com:19302' }];
+let hostId = 0, isHost = false, worker = null, toHost = null;
+const peers = new Map(), members = new Set(); // (방장일 때) 참가자별 WebRTC 연결, 게임 참가자 명단
+function wsSend(o) { if (ws && ws.readyState === 1) ws.send(JSON.stringify(o)); }
+function chOpen(c) { return !!(c && c.u && c.r && c.u.readyState === 'open' && c.r.readyState === 'open'); }
+function transport() { return isHost ? '방장' : chOpen(toHost) ? 'UDP' : '중계'; }
+// 방장에게 보내기: 내가 방장이면 바로 워커로, 직접 연결(UDP)이 열려 있으면 그쪽, 아니면 서버 중계
+function sendToHost(m, reliable) {
+  if (isHost) { fromClient(myId, m); return; }
+  if (chOpen(toHost)) { try { (reliable ? toHost.r : toHost.u).send(JSON.stringify(m)); return; } catch (e) {} }
+  wsSend({ t: 'rl', to: hostId, d: m });
+}
+function sendToClient(id, m, reliable) {
+  if (id === myId) { onMsg(m); return; }
+  const c = peers.get(id);
+  if (chOpen(c)) { try { (reliable ? c.r : c.u).send(JSON.stringify(m)); return; } catch (e) {} }
+  wsSend({ t: 'rl', to: id, d: m });
+}
+function fromClient(id, m) {
+  if (!worker || !members.has(id)) return;
+  if (m.t === 'in') worker.postMessage({ t: 'in', id, m });
+  else if (m.t === 'ping') sendToClient(id, { t: 'pong', c: m.c }, false);
+}
+function onServer(m) {
+  if (m.t === 'welcome') myId = m.id;
+  else if (m.t === 'full') alert('방이 꽉 찼어요 (최대 8명). 잠시 후 다시 시도하세요.');
+  else if (m.t === 'host') setHost(m.id, m.peers);
+  else if (m.t === 'peer-join') { if (isHost) { members.add(m.id); worker.postMessage({ t: 'add', id: m.id, name: m.name }); } }
+  else if (m.t === 'peer-leave') {
+    if (isHost) { members.delete(m.id); worker.postMessage({ t: 'remove', id: m.id }); const c = peers.get(m.id); if (c) { c.pc.close(); peers.delete(m.id); } }
+  }
+  else if (m.t === 'sig') onSignal(m.from, m.d);
+  else if (m.t === 'rl') { if (isHost) fromClient(m.from, m.d); else if (m.from === hostId) onMsg(m.d); }
+}
+// 방장이 정해지거나 바뀜: 내가 방장이면 워커에서 새 판을 열고, 아니면 방장에게 WebRTC 연결
+function setHost(id, list) {
+  if (hostId && id !== hostId) addFeed([['방장이 나가서 새 판을 시작해요', '#8b92a3']]);
+  if (worker) { worker.terminate(); worker = null; }
+  for (const c of peers.values()) c.pc.close();
+  peers.clear(); members.clear();
+  if (toHost) { toHost.pc.close(); toHost = null; }
+  resetView();
+  hostId = id; isHost = id === myId;
+  if (isHost) {
+    worker = new Worker('host-worker.js');
+    worker.onmessage = e => { const m = e.data, rel = m.t === 'e'; for (const pid of members) sendToClient(pid, m, rel); };
+    for (const p of list || []) { members.add(p.id); worker.postMessage({ t: 'add', id: p.id, name: p.name }); }
+  } else connectToHost();
+}
+// 참가자 → 방장 연결: 상태·입력은 순서 무시·재전송 없는 채널(u, UDP처럼), 이벤트는 신뢰 채널(r)
+function connectToHost() {
+  if (!window.RTCPeerConnection) return; // 지원 안 하면 서버 중계로만
+  const pc = new RTCPeerConnection({ iceServers: ICE });
+  const c = toHost = { pc, target: hostId, pend: [],
+    u: pc.createDataChannel('u', { ordered: false, maxRetransmits: 0 }), r: pc.createDataChannel('r') };
+  c.u.onmessage = c.r.onmessage = e => { if (toHost === c) onMsg(JSON.parse(e.data)); };
+  pc.onicecandidate = e => { if (e.candidate) wsSend({ t: 'sig', to: c.target, d: { c: e.candidate } }); };
+  pc.createOffer().then(o => pc.setLocalDescription(o))
+    .then(() => wsSend({ t: 'sig', to: c.target, d: { sdp: pc.localDescription } })).catch(() => {});
+}
+async function addCand(c, cand) { if (c.pc.remoteDescription) await c.pc.addIceCandidate(cand).catch(() => {}); else c.pend.push(cand); }
+async function setRemote(c, sdp) { await c.pc.setRemoteDescription(sdp); for (const x of c.pend.splice(0)) await c.pc.addIceCandidate(x).catch(() => {}); }
+async function onSignal(from, d) {
+  try {
+    if (isHost) {
+      if (d.sdp && d.sdp.type === 'offer') {
+        const old = peers.get(from); if (old) old.pc.close();
+        const pc = new RTCPeerConnection({ iceServers: ICE });
+        const c = { pc, pend: [], u: null, r: null };
+        peers.set(from, c);
+        pc.ondatachannel = e => { const ch = e.channel; c[ch.label] = ch; ch.onmessage = ev => fromClient(from, JSON.parse(ev.data)); };
+        pc.onicecandidate = e => { if (e.candidate) wsSend({ t: 'sig', to: from, d: { c: e.candidate } }); };
+        await setRemote(c, d.sdp);
+        await pc.setLocalDescription(await pc.createAnswer());
+        wsSend({ t: 'sig', to: from, d: { sdp: pc.localDescription } });
+      } else if (d.c && peers.has(from)) await addCand(peers.get(from), d.c);
+    } else if (toHost && from === toHost.target) {
+      const c = toHost;
+      if (d.sdp) await setRemote(c, d.sdp); else if (d.c) await addCand(c, d.c);
+    }
+  } catch (e) {}
+}
+function resetView() {
+  snaps = []; offSamples = []; lateSamples = []; latest = null;
+  pred = null; hist.clear(); offX = offY = 0; lastDashSeq = 0; bfAvg = BUF_TARGET; simRate = 1; recentIn.length = 0; net.gqBase = 0;
 }
 
 // ---------- 입력 ----------
@@ -175,6 +262,7 @@ function readInput() {
 // 서버와 같은 물리로 내 화면에서 먼저 움직이고, 서버 결과와 어긋난 만큼만 부드럽게 보정한다.
 const SIM = { DT: 1 / 60, ACC: 1500, FRICTION: 4, DASH_SPEED: 820, DASH_CD: 1.4, DASH_TIME: 0.22 };
 let pred = null, seq = 0, simAcc = 0, offX = 0, offY = 0, lastDashSeq = 0;
+const recentIn = []; // 최근 보낸 입력 3개 (UDP로 빠진 입력을 방장이 메울 수 있게 매번 같이 보냄)
 // 서버 입력 버퍼에 늘 2개쯤 쌓여 있도록 내 시뮬레이션 속도를 ±6% 안에서 조절 (Overwatch식 시간 조절)
 const BUF_TARGET = 2; let bfAvg = BUF_TARGET, simRate = 1;
 const DASH_STEPS = Math.round(SIM.DASH_CD / SIM.DT); // 서버와 같은 기준(입력 84개)
@@ -182,9 +270,10 @@ const hist = new Map();
 function simStep() {
   const [rx, ry] = readInput(), ix0 = +rx.toFixed(2), iy0 = +ry.toFixed(2), dash = dashReq;
   dashReq = false;
-  if (!ws || ws.readyState !== 1 || !myId) return;
+  if (!myId || !hostId) return;
   seq++;
-  ws.send(JSON.stringify({ t: 'in', x: ix0, y: iy0, d: dash ? 1 : 0, q: seq }));
+  sendToHost({ t: 'in', x: ix0, y: iy0, d: dash ? 1 : 0, q: seq, h: recentIn });
+  recentIn.unshift([seq, ix0, iy0, dash ? 1 : 0]); if (recentIn.length > 3) recentIn.pop();
   if (!pred) return;
   const p = pred, frozen = latest && (latest.ph === 'countdown' || latest.ph === 'roundover');
   if (p.dashCd > 0) p.dashCd -= SIM.DT;
@@ -236,7 +325,7 @@ function onState(m) {
   const now = performance.now(), off = now - m.tm;
   if (net.lastAt) { const g = now - net.lastAt; if (g > 100) net.gaps++; net.maxGap = Math.max(net.maxGap, g); }
   net.lastAt = now;
-  if (snaps.length && m.tm < snaps[snaps.length - 1].tm) { snaps = []; offSamples = []; lateSamples = []; } // 서버 재시작
+  if (snaps.length && m.tm <= snaps[snaps.length - 1].tm) return; // UDP라 순서가 뒤바뀌거나 중복된 상태는 버림
   offSamples.push({ t: now, off });
   while (offSamples[0].t < now - 5000) offSamples.shift();
   clockOff = Math.min(...offSamples.map(o => o.off));
@@ -247,14 +336,14 @@ function onState(m) {
   reconcile(m);
 }
 // ---------- 회선 기록 (실전 테스트 분석용, 화면엔 안 보임): 2초마다 핑, 10초마다 상태 보고 ----------
-const net = { gaps: 0, maxGap: 0, lastAt: 0, frames: 0, rtts: [] };
-setInterval(() => { if (ws && ws.readyState === 1 && myId) ws.send(JSON.stringify({ t: 'ping', c: performance.now() })); }, 2000);
+const net = { gaps: 0, maxGap: 0, lastAt: 0, frames: 0, rtts: [], rtt: 0, gqBase: 0 };
+setInterval(() => { if (myId && hostId) sendToHost({ t: 'ping', c: performance.now() }); }, 2000);
 setInterval(() => {
-  if (!ws || ws.readyState !== 1 || !myId) return;
-  const r = net.rtts;
-  ws.send(JSON.stringify({ t: 'nst', g: net.gaps, m: net.maxGap, d: renderDelay, f: net.frames / 10,
-    ra: r.length ? r.reduce((a, b) => a + b, 0) / r.length : 0, rm: r.length ? Math.max(...r) : 0 }));
-  Object.assign(net, { gaps: 0, maxGap: 0, frames: 0, rtts: [] });
+  if (!myId || !hostId) return;
+  const r = net.rtts, meNow = latest && latest.p.find(p => p.i === myId), gq = meNow ? meNow.gq || 0 : 0;
+  wsSend({ t: 'nst', tr: transport(), g: net.gaps, m: net.maxGap, d: renderDelay, f: net.frames / 10, bf: bfAvg, gq: gq - net.gqBase,
+    ra: r.length ? r.reduce((a, b) => a + b, 0) / r.length : 0, rm: r.length ? Math.max(...r) : 0 });
+  Object.assign(net, { gaps: 0, maxGap: 0, frames: 0, rtts: [], gqBase: gq });
 }, 10000);
 function targetDelay() {
   const l = lateSamples.map(o => o.late).sort((a, b) => a - b);
@@ -398,6 +487,13 @@ function drawHUD(st, now) {
     for (const [txt, col] of f.parts) { cx.lineWidth = 3; cx.strokeStyle = 'rgba(0,0,0,.6)'; cx.strokeText(txt, fx, fy); cx.fillStyle = col; cx.fillText(txt, fx, fy); fx += cx.measureText(txt).width; }
     fy += 20; cx.globalAlpha = 1;
   }
+
+  // 연결 상태: 방장 / UDP 직접 연결 / 서버 중계
+  const tr = transport(), ib = $('invite');
+  cx.font = '600 12px -apple-system,"Apple SD Gothic Neo",sans-serif'; cx.textAlign = 'left'; cx.textBaseline = 'middle';
+  cx.fillStyle = tr === 'UDP' ? '#7be35a' : tr === '중계' ? '#ffb13b' : BRAND;
+  cx.fillText(tr === '방장' ? '방장 · 내 브라우저가 게임을 돌리는 중' : (tr === 'UDP' ? 'UDP 직접 연결' : '서버 중계 연결') + (net.rtt ? ` · 핑 ${Math.round(net.rtt)}ms` : ''),
+    12 + (ib.offsetWidth || 0) + 10, 12 + (ib.offsetHeight || 30) / 2);
 
   // 모바일 조이스틱
   if (stick.id !== null) {
