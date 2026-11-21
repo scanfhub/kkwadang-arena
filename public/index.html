@@ -46,7 +46,7 @@
 <script>
 (() => {
 const COLORS = ['#ff5a5f','#3ec1ff','#7be35a','#ffb13b','#c77dff','#ff7ac6','#2ee6c5','#f4f1e8'];
-const ARENA_R0 = 420, BRAND = '#ffd23f', DELAY = 90;
+const ARENA_R0 = 420, BRAND = '#ffd23f';
 const cv = document.getElementById('c'), cx = cv.getContext('2d');
 const $ = id => document.getElementById(id);
 let W = 0, H = 0, DPR = 1, narrow = false;
@@ -102,7 +102,7 @@ function colorOf(i) { const p = latest && latest.p.find(q => q.i === i); return 
 function addFeed(parts) { feed.push({ parts, t: performance.now() }); if (feed.length > 6) feed.shift(); }
 
 function onMsg(m) {
-  if (m.t === 's') { snaps.push({ rt: performance.now(), s: m }); latest = m; if (snaps.length > 40) snaps.shift(); return; }
+  if (m.t === 's') { onState(m); return; }
   if (m.t === 'welcome') { myId = m.id; return; }
   if (m.t === 'full') { alert('방이 꽉 찼어요 (최대 8명). 잠시 후 다시 시도하세요.'); return; }
   if (m.t !== 'e') return;
@@ -112,7 +112,6 @@ function onMsg(m) {
     shake = Math.max(shake, Math.min(18, m.f / 45));
     tone(140, .18, 'sine', Math.min(.5, .1 + m.f / 1500), 50); noise(.08, Math.min(.35, m.f / 2000));
   } else if (m.k === 'dash') {
-    if (m.i === myId) tone(320, .15, 'triangle', .12, 900);
   } else if (m.k === 'fall') {
     tone(700, .6, 'square', .07, 90);
     if (m.practice) addFeed([[m.n, colorOf(m.i)], ['님 연습 중 낙하', '#8b92a3']]);
@@ -134,7 +133,7 @@ function onMsg(m) {
 
 // ---------- 입력 ----------
 const keys = {};
-let dashReq = false, lastSent = '', lastSendT = 0;
+let dashReq = false;
 addEventListener('keydown', e => {
   if (document.activeElement === $('name')) return;
   keys[e.code] = true;
@@ -171,32 +170,102 @@ function readInput() {
   }
   return [x, y];
 }
-function sendInput(now) {
+// ---------- 내 캐릭터 즉시 반응 (클라이언트 예측) ----------
+// 서버와 같은 물리로 내 화면에서 먼저 움직이고, 서버 결과와 어긋난 만큼만 부드럽게 보정한다.
+const SIM = { DT: 1 / 60, ACC: 1500, FRICTION: 4, DASH_SPEED: 820, DASH_CD: 1.4, DASH_TIME: 0.22 };
+let pred = null, seq = 0, simAcc = 0, offX = 0, offY = 0, lastDashSeq = 0;
+const DASH_STEPS = Math.round(SIM.DASH_CD / SIM.DT); // 서버와 같은 기준(입력 84개)
+const hist = new Map();
+function simStep() {
+  const [rx, ry] = readInput(), ix0 = +rx.toFixed(2), iy0 = +ry.toFixed(2), dash = dashReq;
+  dashReq = false;
   if (!ws || ws.readyState !== 1 || !myId) return;
-  const [x, y] = readInput();
-  const key = x.toFixed(2) + ',' + y.toFixed(2);
-  if (dashReq || key !== lastSent || now - lastSendT > 250) {
-    ws.send(JSON.stringify({ t: 'in', x: +x.toFixed(2), y: +y.toFixed(2), d: dashReq ? 1 : 0 }));
-    lastSent = key; lastSendT = now; dashReq = false;
+  seq++;
+  ws.send(JSON.stringify({ t: 'in', x: ix0, y: iy0, d: dash ? 1 : 0, q: seq }));
+  if (!pred) return;
+  const p = pred, frozen = latest && (latest.ph === 'countdown' || latest.ph === 'roundover');
+  if (p.dashCd > 0) p.dashCd -= SIM.DT;
+  if (p.dashT > 0) p.dashT -= SIM.DT;
+  if (!frozen) {
+    let ix = ix0, iy = iy0; const l = Math.hypot(ix, iy);
+    if (l > 1) { ix /= l; iy /= l; }
+    p.vx += ix * SIM.ACC * SIM.DT; p.vy += iy * SIM.ACC * SIM.DT;
+    if (l > 0.1) p.f = Math.atan2(iy, ix);
+    if (dash && (!lastDashSeq || seq - lastDashSeq >= DASH_STEPS)) {
+      lastDashSeq = seq;
+      const dx = l > 0.1 ? ix / Math.min(1, l) : Math.cos(p.f), dy = l > 0.1 ? iy / Math.min(1, l) : Math.sin(p.f), dl = Math.hypot(dx, dy) || 1;
+      p.vx = dx / dl * SIM.DASH_SPEED; p.vy = dy / dl * SIM.DASH_SPEED; p.dashT = SIM.DASH_TIME; p.dashCd = SIM.DASH_CD;
+      tone(320, .15, 'triangle', .12, 900);
+    }
+  } else { p.vx *= .8; p.vy *= .8; }
+  const fr = Math.exp(-SIM.FRICTION * SIM.DT); p.vx *= fr; p.vy *= fr;
+  p.px = p.x; p.py = p.y; // 화면 보간용 직전 위치
+  p.x += p.vx * SIM.DT; p.y += p.vy * SIM.DT;
+  hist.set(seq, { x: p.x, y: p.y, vx: p.vx, vy: p.vy });
+  hist.delete(seq - 240);
+}
+function reconcile(m) {
+  const me = m.p.find(p => p.i === myId);
+  if (!me || me.s !== 0) { pred = null; return; }
+  const h = hist.get(me.q);
+  if (!pred || !h) {
+    if (!pred) { pred = { x: me.x, y: me.y, px: me.x, py: me.y, vx: me.vx, vy: me.vy, f: me.f, dashT: 0, dashCd: me.cd * SIM.DASH_CD }; offX = offY = 0; hist.clear(); }
+    return;
   }
+  const ex = me.x - h.x, ey = me.y - h.y, evx = me.vx - h.vx, evy = me.vy - h.vy;
+  for (const k of hist.keys()) if (k <= me.q) hist.delete(k);
+  if (Math.hypot(ex, ey) > 150) { // 리스폰·라운드 시작 같은 순간이동은 바로 맞춘다
+    Object.assign(pred, { x: me.x, y: me.y, px: me.x, py: me.y, vx: me.vx, vy: me.vy }); offX = offY = 0; hist.clear(); return;
+  }
+  if (Math.abs(ex) + Math.abs(ey) < 2 && Math.abs(evx) + Math.abs(evy) < 20) return;
+  pred.x += ex; pred.y += ey; pred.px += ex; pred.py += ey; pred.vx += evx; pred.vy += evy;
+  offX -= ex; offY -= ey; // 화면상 위치는 그대로 두고 오차를 서서히 흡수
+  for (const v of hist.values()) { v.x += ex; v.y += ey; v.vx += evx; v.vy += evy; }
 }
 
-// ---------- 보간 ----------
+// ---------- 다른 사람: 서버 시각 기준 보간 + 적응형 버퍼 + 외삽 ----------
+let offSamples = [], lateSamples = [], clockOff = 0, renderDelay = 100;
+function onState(m) {
+  const now = performance.now(), off = now - m.tm;
+  if (snaps.length && m.tm < snaps[snaps.length - 1].tm) { snaps = []; offSamples = []; lateSamples = []; } // 서버 재시작
+  offSamples.push({ t: now, off });
+  while (offSamples[0].t < now - 5000) offSamples.shift();
+  clockOff = Math.min(...offSamples.map(o => o.off));
+  lateSamples.push({ t: now, late: off - clockOff });
+  while (lateSamples[0].t < now - 4000) lateSamples.shift();
+  snaps.push(m); if (snaps.length > 90) snaps.shift();
+  latest = m;
+  reconcile(m);
+}
+function targetDelay() {
+  const l = lateSamples.map(o => o.late).sort((a, b) => a - b);
+  const p90 = l.length ? l[Math.floor(l.length * .9)] : 60;
+  return Math.max(50, Math.min(220, p90 + 40));
+}
 function lerpAng(a, b, t) { let d = b - a; while (d > Math.PI) d -= 6.283; while (d < -Math.PI) d += 6.283; return a + d * t; }
 function interp(now) {
   if (!snaps.length) return null;
-  const rt = now - DELAY;
+  const rt = now - clockOff - renderDelay;
   let a = snaps[0], b = snaps[snaps.length - 1];
-  for (let i = 0; i < snaps.length - 1; i++) if (snaps[i].rt <= rt && snaps[i + 1].rt >= rt) { a = snaps[i]; b = snaps[i + 1]; break; }
-  if (rt >= b.rt) a = b;
-  const t = a === b ? 1 : Math.max(0, Math.min(1, (rt - a.rt) / (b.rt - a.rt)));
-  const pa = new Map(a.s.p.map(p => [p.i, p]));
-  const ps = b.s.p.map(p => {
+  for (let i = 0; i < snaps.length - 1; i++) if (snaps[i].tm <= rt && snaps[i + 1].tm >= rt) { a = snaps[i]; b = snaps[i + 1]; break; }
+  if (rt >= b.tm) { // 패킷이 늦으면 멈추지 말고 진행 방향으로 이어 그리기 (최대 120ms)
+    const e = Math.min(rt - b.tm, 120) / 1000;
+    return { ...b, p: b.p.map(p => p.s === 0 ? { ...p, x: p.x + p.vx * e, y: p.y + p.vy * e } : p) };
+  }
+  if (rt <= a.tm) return a;
+  const t = (rt - a.tm) / (b.tm - a.tm);
+  const pa = new Map(a.p.map(p => [p.i, p]));
+  const ps = b.p.map(p => {
     const o = pa.get(p.i);
     if (!o || o.s !== p.s && p.s === 0) return p;
     return { ...p, x: o.x + (p.x - o.x) * t, y: o.y + (p.y - o.y) * t, f: lerpAng(o.f, p.f, t), r: o.r + (p.r - o.r) * t, ft: o.ft + (p.ft - o.ft) * t };
   });
-  return { ...b.s, ar: a.s.ar + (b.s.ar - a.s.ar) * t, p: ps };
+  return { ...b, ar: a.ar + (b.ar - a.ar) * t, p: ps };
+}
+function withPrediction(st) {
+  if (!pred || !st) return st;
+  return { ...st, p: st.p.map(p => p.i === myId && p.s === 0
+    ? { ...p, x: pred.px + (pred.x - pred.px) * (simAcc / SIM.DT) + offX, y: pred.py + (pred.y - pred.py) * (simAcc / SIM.DT) + offY, f: pred.f, d: pred.dashT > 0 ? 1 : 0, cd: Math.max(0, pred.dashCd / SIM.DASH_CD) } : p) };
 }
 
 // ---------- 그리기 ----------
@@ -327,11 +396,14 @@ function drawHUD(st, now) {
 
 let lastFrame = performance.now();
 function frame(now) {
-  const dt = Math.min(.05, (now - lastFrame) / 1000); lastFrame = now;
-  sendInput(now);
+  const raw = (now - lastFrame) / 1000, dt = Math.min(.05, raw); lastFrame = now;
+  simAcc += Math.min(raw, .1);
+  while (simAcc >= SIM.DT) { simStep(); simAcc -= SIM.DT; }
+  const k = Math.exp(-10 * dt); offX *= k; offY *= k;
+  renderDelay += (targetDelay() - renderDelay) * Math.min(1, dt * 2);
   cx.setTransform(DPR, 0, 0, DPR, 0, 0);
   cx.fillStyle = '#0e1016'; cx.fillRect(0, 0, W, H);
-  const st = interp(now);
+  const st = withPrediction(interp(now));
   if (st) {
     const topPad = narrow ? 112 + 30 + st.p.length * 24 + 14 : 76, botPad = narrow ? (isTouch ? 100 : 16) : 12, avail = H - topPad - botPad;
     const sc = Math.min(W - 24, avail) / (ARENA_R0 * 2 + 40);

@@ -13,7 +13,7 @@ const ARENA_R0 = 420, ARENA_MIN = 150;
 const SHRINK_DELAY = 6, SHRINK_TIME = 35;
 const PR = 24, BIG_R = 40;
 const ACC = 1500, FRICTION = 4;
-const DASH_SPEED = 820, DASH_CD = 1.4, DASH_TIME = 0.22;
+const DASH_SPEED = 820, DASH_CD = 1.4, DASH_TIME = 0.22, DASH_STEPS = Math.round(DASH_CD * TICK);
 const RESTITUTION = 1.25;
 const MAX_PLAYERS = 8;
 const COUNTDOWN = 3, ROUNDOVER = 4;
@@ -126,6 +126,7 @@ function step() {
       if (p.fallT > 0.7) {
         if (phase === 'lobby') spawnRandom(p); else p.state = 2;
       }
+      p.wantDash = false;
       continue;
     }
     if (!frozen) {
@@ -134,9 +135,15 @@ function step() {
       if (l > 1) { ix /= l; iy /= l; }
       p.vx += ix * ACC * DT; p.vy += iy * ACC * DT;
       if (l > 0.1) p.face = Math.atan2(iy, ix);
-      if (p.wantDash && p.dashCd <= 0) {
-        const dx = l > 0.1 ? ix / Math.min(1, l) : Math.cos(p.face);
-        const dy = l > 0.1 ? iy / Math.min(1, l) : Math.sin(p.face);
+      // 번호 붙은 입력은 메시지 도착 순서대로 쿨타임을 판정해 둔 대시를 그 순간의 방향으로 실행 (실시간 쿨타임은 0.4초까지 봐줌)
+      if (p.wantDash && p.dashCd <= (p.dashQ ? 0.4 : 0)) {
+        let ddx = ix, ddy = iy, dl0 = l;
+        if (p.dashQ) {
+          p.lastDashQ = p.dashQ; ddx = p.dashX; ddy = p.dashY; dl0 = Math.hypot(ddx, ddy);
+          if (dl0 > 1) { ddx /= dl0; ddy /= dl0; }
+        }
+        const dx = dl0 > 0.1 ? ddx / Math.min(1, dl0) : Math.cos(p.face);
+        const dy = dl0 > 0.1 ? ddy / Math.min(1, dl0) : Math.sin(p.face);
         const dl = Math.hypot(dx, dy) || 1;
         p.vx = dx / dl * DASH_SPEED; p.vy = dy / dl * DASH_SPEED;
         p.dashT = DASH_TIME; p.dashCd = DASH_CD;
@@ -212,7 +219,7 @@ function step() {
     broadcast({
       t: 's', tm: Math.round(performance.now()), ph: phase, pt: Math.max(0, Math.round(phaseT * 10) / 10), ar: Math.round(arenaR),
       p: [...players.values()].map(p => ({
-        i: p.id, n: p.name, c: p.color, x: Math.round(p.x), y: Math.round(p.y),
+        i: p.id, n: p.name, c: p.color, x: Math.round(p.x), y: Math.round(p.y), vx: Math.round(p.vx), vy: Math.round(p.vy), q: p.q,
         r: radius(p), s: p.inRound ? p.state : 2, f: Math.round(p.face * 100) / 100,
         d: p.dashT > 0 ? 1 : 0, cd: Math.max(0, Math.round(p.dashCd / DASH_CD * 100) / 100),
         sc: p.score, ko: p.kos, ft: Math.round(p.fallT * 100) / 100,
@@ -230,7 +237,7 @@ wss.on('connection', (ws) => {
     if (m.t === 'join' && !me) {
       if (players.size >= MAX_PLAYERS) { ws.send(JSON.stringify({ t: 'full' })); return; }
       const name = String(m.name || '').trim().slice(0, 10) || '이름없음';
-      me = { id: nextId++, name, color: freeColor(), score: 0, kos: 0, ix: 0, iy: 0, face: 0, wantDash: false, inRound: phase === 'lobby' || phase === 'countdown' };
+      me = { id: nextId++, name, color: freeColor(), score: 0, kos: 0, ix: 0, iy: 0, face: 0, q: 0, wantDash: false, inRound: phase === 'lobby' || phase === 'countdown' };
       spawnRandom(me);
       if (!me.inRound) me.state = 2;
       players.set(me.id, me);
@@ -239,7 +246,14 @@ wss.on('connection', (ws) => {
     } else if (me && m.t === 'in') {
       me.ix = Math.max(-1, Math.min(1, +m.x || 0));
       me.iy = Math.max(-1, Math.min(1, +m.y || 0));
-      if (m.d) me.wantDash = true;
+      const q = m.q | 0;
+      if (m.d) {
+        if (!q) { me.wantDash = true; me.dashQ = 0; } // 번호 없는 입력(봇 등): 기존 방식
+        else if (!me.wantDash && (!me.lastDashQ || q - me.lastDashQ >= DASH_STEPS)) {
+          me.wantDash = true; me.dashQ = q; me.dashX = me.ix; me.dashY = me.iy;
+        }
+      }
+      if (q) me.q = q;
     }
   });
   ws.on('close', () => {
