@@ -20,14 +20,15 @@
   .card button { width:100%; margin-top:10px; font-size:16px; font-weight:700; padding:13px; border:0; border-radius:10px; background:var(--brand); color:#1a1400; cursor:pointer; }
   .keys { margin-top:18px; font-size:13px; color:var(--sub); line-height:1.9; }
   .keys kbd { display:inline-block; min-width:22px; text-align:center; padding:1px 6px; border:1px solid var(--line); border-bottom-width:2px; border-radius:5px; color:var(--text); font-family:inherit; font-size:12px; background:#10131a; }
-  #invite { position:fixed; left:12px; top:12px; font-size:13px; padding:7px 11px; border-radius:8px; border:1px solid var(--line); background:var(--panel); color:var(--text); cursor:pointer; display:none; }
+  #topbar { position:fixed; left:12px; top:12px; display:none; gap:6px; }
+  #topbar button { font-size:13px; padding:7px 11px; border-radius:8px; border:1px solid var(--line); background:var(--panel); color:var(--text); cursor:pointer; }
   #invite.ok { border-color:var(--brand); color:var(--brand); }
   #dc { position:fixed; inset:0; display:none; align-items:center; justify-content:center; background:rgba(14,16,22,.9); font-size:16px; text-align:center; line-height:1.7; }
 </style>
 </head>
 <body>
 <canvas id="c"></canvas>
-<button id="invite">초대 링크 복사</button>
+<div id="topbar"><button id="invite">초대 링크 복사</button><button id="botAdd">봇 추가</button><button id="botDel">봇 빼기</button></div>
 <div id="join">
   <div class="card">
     <h1>꽈당 <b>아레나</b></h1>
@@ -39,7 +40,8 @@
       대시 박치기 <kbd>Space</kbd> — 1.4초마다 한 번<br>
       폰: 왼쪽 화면 드래그로 이동, 오른쪽 화면 탭으로 대시<br>
       노란 아이템 <span style="color:#7be35a">거대화</span>·<span style="color:#ff5a5f">충격파</span>·<span style="color:#c77dff">혼란파</span>(남들 방향키 반대)는 먼저 먹는 사람 것<br>
-      판마다 빙판·범퍼·바람·구멍·운석·회전 막대·폭탄·지진 중 몇 가지가 랜덤으로 나와요
+      판마다 빙판·범퍼·바람·구멍·운석·회전 막대·폭탄·지진 중 몇 가지가 랜덤으로 나와요<br>
+      혼자여도 방장이면 왼쪽 위 <b>봇 추가</b>로 바로 한 판 할 수 있어요
     </div>
   </div>
 </div>
@@ -158,12 +160,14 @@ function join() {
   ws.onopen = () => ws.send(JSON.stringify({ t: 'join', name, canHost: !isTouch }));
   ws.onmessage = ev => onServer(JSON.parse(ev.data));
   ws.onclose = () => { $('dc').style.display = 'flex'; };
-  $('join').style.display = 'none'; $('invite').style.display = 'block';
+  $('join').style.display = 'none'; $('topbar').style.display = 'flex';
 }
 try { $('name').value = localStorage.getItem('kd-name') || ''; } catch (e) {}
 $('go').onclick = join;
 $('name').onkeydown = e => { if (e.key === 'Enter') join(); };
-$('invite').onclick = async () => {
+for (const [id, op] of [['botAdd', 'add'], ['botDel', 'del']]) $(id).onclick = e => { e.currentTarget.blur(); if (worker) worker.postMessage({ t: 'bot', op }); };
+$('invite').onclick = async e => {
+  e.currentTarget.blur();
   const url = location.origin + '/';
   try { await navigator.clipboard.writeText(url); } catch (e) { prompt('이 주소를 친구에게 보내세요', url); }
   $('invite').textContent = '복사됨 — 친구에게 붙여넣기'; $('invite').classList.add('ok');
@@ -269,6 +273,7 @@ function setHost(id, list) {
   if (toHost) { toHost.pc.close(); toHost = null; }
   resetView();
   hostId = id; isHost = id === myId;
+  $('botAdd').style.display = $('botDel').style.display = isHost ? '' : 'none'; // 봇은 방장 브라우저가 조종하므로 방장만
   if (isHost) {
     worker = new Worker('host-worker.js');
     worker.onmessage = e => { const m = e.data, rel = m.t === 'e'; for (const pid of members) sendToClient(pid, m, rel); };
@@ -612,7 +617,10 @@ function drawHUD(st, now) {
   const me = st.p.find(p => p.i === myId);
   const alive = st.p.filter(p => p.s !== 2).length;
   let big = '', small = '', smallCol = '#c3c8d4';
-  if (st.ph === 'lobby') { big = st.p.length < 2 ? '친구를 기다리는 중' : '곧 시작'; small = '2명 이상 모이면 라운드 시작 · 지금은 떨어져도 다시 살아나요'; }
+  if (st.ph === 'lobby') {
+    big = st.p.length < 2 ? '친구를 기다리는 중' : '곧 시작';
+    small = isHost && st.p.length < 2 ? '혼자면 왼쪽 위 [봇 추가]로 바로 시작 · 친구는 초대 링크로' : '2명 이상 모이면 라운드 시작 · 지금은 떨어져도 다시 살아나요';
+  }
   else if (st.ph === 'countdown') {
     big = String(Math.max(1, Math.ceil(st.pt)));
     const ks = (st.mp && st.mp.k || []).map(k => KIND_NAME[k]).filter(Boolean);
@@ -672,10 +680,10 @@ function drawHUD(st, now) {
   }
 
   // 연결 상태: 방장 / UDP 직접 연결 / 서버 중계
-  const tr = transport(), ib = $('invite');
+  const tr = transport(), ib = $('topbar');
   cx.font = '600 12px -apple-system,"Apple SD Gothic Neo",sans-serif'; cx.textAlign = 'left'; cx.textBaseline = 'middle';
   cx.fillStyle = tr === 'UDP' ? '#7be35a' : tr === '중계' ? '#ffb13b' : BRAND;
-  cx.fillText(tr === '방장' ? '방장 · 내 브라우저가 게임을 돌리는 중' : (tr === 'UDP' ? 'UDP 직접 연결' : '서버 중계 연결') + (net.rtt ? ` · 핑 ${Math.round(net.rtt)}ms` : ''),
+  cx.fillText(tr === '방장' ? '방장' : (tr === 'UDP' ? 'UDP 직접 연결' : '서버 중계 연결') + (net.rtt ? ` · 핑 ${Math.round(net.rtt)}ms` : ''),
     12 + (ib.offsetWidth || 0) + 10, 12 + (ib.offsetHeight || 30) / 2);
 
   // 모바일 조이스틱

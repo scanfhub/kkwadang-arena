@@ -162,6 +162,7 @@ class Sim {
 
   addPlayer(id, name) {
     if (this.players.has(id)) return;
+    if (this.players.size >= MAX_PLAYERS && id > 0) { const b = [...this.players.values()].find(q => q.bot); if (b) this.removePlayer(b.id); }
     const p = { id, name, color: this.freeColor(), score: 0, kos: 0, ix: 0, iy: 0, face: 0, q: 0, gq: 0, wantDash: false,
       inRound: this.phase === 'lobby' || this.phase === 'countdown', guessed: new Set() };
     this.spawnRandom(p);
@@ -176,6 +177,55 @@ class Sim {
     if (this.bomb && this.bomb.h === id) { this.bomb = null; this.nextBombAt = this.roundT + 4; }
     this.event('leave', { n: p.name });
   }
+  // ---- 봇 (방장 브라우저가 대신 조종, id는 음수) ----
+  addBot() {
+    if (this.players.size >= MAX_PLAYERS) return;
+    this.nextBotId = (this.nextBotId || 0) - 1; this.botSeq = (this.botSeq || 0) + 1;
+    this.addPlayer(this.nextBotId, '봇' + this.botSeq);
+    this.players.get(this.nextBotId).bot = { think: 0, ix: 0, iy: 0 };
+  }
+  removeBot() { const b = [...this.players.values()].filter(q => q.bot).pop(); if (b) this.removePlayer(b.id); }
+  // 봇 판단: 5~8틱마다 다시 생각(반응 지연), 위험 피하기 → 상대를 바깥으로 밀 각도면 대시
+  botThink(p, solid) {
+    const b = p.bot;
+    if (--b.think > 0) { p.ix = b.ix; p.iy = b.iy; return; }
+    b.think = 5 + Math.floor(Math.random() * 4);
+    const d0 = Math.hypot(p.x, p.y) || 1, edge = this.arenaR - d0;
+    let ax = 0, ay = 0, dash = false;
+    if (edge < 80) { ax -= p.x / d0 * 2; ay -= p.y / d0 * 2; }                       // 링 가장자리에서 안쪽으로
+    for (const h of this.map.hole) {                                                   // 구멍 피하기
+      const dx = p.x - h.x, dy = p.y - h.y, d = Math.hypot(dx, dy) || 1;
+      if (d < h.r + 60) { ax += dx / d * 2; ay += dy / d * 2; }
+    }
+    for (const m of this.meteors) {                                                    // 운석 경고 피하기
+      const dx = p.x - m.x, dy = p.y - m.y, d = Math.hypot(dx, dy) || 1;
+      if (d < MT_R + 40) { ax += dx / d * 2.5; ay += dy / d * 2.5; if (m.t < 0.6) dash = true; }
+    }
+    const holder = this.bomb && this.players.get(this.bomb.h);
+    if (holder && holder !== p && holder.state === 0) {                                // 남이 든 폭탄 피하기
+      const dx = p.x - holder.x, dy = p.y - holder.y, d = Math.hypot(dx, dy) || 1;
+      if (d < 220) { ax += dx / d * 1.5; ay += dy / d * 1.5; }
+    }
+    let target = null, best = 1e9;                                                     // 가장 가까운 상대 (폭탄 든 사람 제외, 내가 들었으면 누구든)
+    for (const o of solid) {
+      if (o === p || (holder === o && holder !== p)) continue;
+      const d = Math.hypot(o.x - p.x, o.y - p.y);
+      if (d < best) { best = d; target = o; }
+    }
+    if (target && edge >= 80) {
+      const to = Math.hypot(target.x, target.y) || 1, ox = target.x / to, oy = target.y / to;
+      const dx = target.x - ox * 30 - p.x, dy = target.y - oy * 30 - p.y, d = Math.hypot(dx, dy) || 1; // 상대보다 안쪽 자리로
+      ax += dx / d; ay += dy / d;
+      const tx = target.x - p.x, ty = target.y - p.y, td = Math.hypot(tx, ty) || 1;
+      if (td < 150 && (tx / td) * ox + (ty / td) * oy > 0.2 && Math.random() < 0.5) dash = true; // 바깥으로 밀 각도면 대시
+    }
+    const l = Math.hypot(ax, ay), jit = (Math.random() - 0.5) * 0.5, c = Math.cos(jit), s = Math.sin(jit); // 살짝 서툴게
+    const ix = l > 0.05 ? ax / l : 0, iy = l > 0.05 ? ay / l : 0;
+    b.ix = ix * c - iy * s; b.iy = ix * s + iy * c;
+    p.ix = b.ix; p.iy = b.iy;
+    if (dash && p.dashCd <= 0) { p.wantDash = true; p.dashQ = 0; }
+  }
+
   // 입력: 번호(q) 붙은 입력은 버퍼에 쌓고, UDP라 빠질 수 있어 같이 실려 온 최근 입력(h)으로 빈 번호를 메운다
   input(id, m) {
     const p = this.players.get(id);
@@ -330,6 +380,7 @@ class Sim {
     const frozen = this.phase === 'countdown' || this.phase === 'roundover';
     const list = [...players.values()].filter(p => p.inRound && p.state !== 2);
     const env = this.envNow(frozen);
+    if (!frozen) { const alive0 = list.filter(p => p.state === 0); for (const p of alive0) if (p.bot) this.botThink(p, alive0); }
 
     // ---- 이동 (공용 이동 함수) ----
     for (const p of list) {
