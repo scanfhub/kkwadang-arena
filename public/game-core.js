@@ -24,6 +24,7 @@ const BOMB_T = 7;                                         // 폭탄: 7초 뒤 �
 const QK_WARN = 1.2, QK_ON = 3, QK_F = 650;               // 지진: 경고 1.2초, 3초간 한쪽으로 쏠림
 const CONF_T = 4;                                         // 혼란파: 4초간 방향키 반대
 const FIELD_KINDS = ['ice', 'bump', 'wind', 'hole'], HAZARD_KINDS = ['meteor', 'sweep', 'bomb', 'quake'];
+const THEMES = ['night', 'lava', 'space', 'snow']; // 판마다 바뀌는 테마(색·분위기). 로비는 밤 경기장
 
 const clamp1 = v => Math.max(-1, Math.min(1, +v || 0));
 const rnd = (a, b) => a + Math.random() * (b - a);
@@ -109,12 +110,15 @@ class Sim {
   }
   clearRound() {
     this.map = { ice: [], wind: [], bump: [], hole: [] };
-    this.fieldKinds = []; this.hz = [];
+    this.fieldKinds = []; this.hz = []; this.theme = 'night';
     this.sw = null; this.meteors = []; this.bomb = null; this.quake = null;
   }
   // 라운드 시작: 필드 2개 + 위험 요소 1~2개를 무작위로 고르고 겹치지 않게 배치
   genRound() {
+    const prevTheme = this.theme;
     this.clearRound();
+    const themes = THEMES.filter(t => t !== prevTheme); // 직전 판과 다른 테마
+    this.theme = themes[Math.floor(Math.random() * themes.length)];
     this.fieldKinds = shuffle(FIELD_KINDS.slice()).slice(0, 2);
     this.hz = shuffle(HAZARD_KINDS.slice()).slice(0, Math.random() < 0.5 ? 1 : 2);
     const taken = [];
@@ -453,7 +457,7 @@ class Sim {
         })),
         u: this.powerups,
         mp: {
-          k: [...this.fieldKinds, ...this.hz],
+          k: [...this.fieldKinds, ...this.hz], th: this.theme,
           ice: m.ice.map(z => [r0(z.x), r0(z.y), z.r]), wind: m.wind.map(z => [r0(z.x), r0(z.y), z.r, r2(z.a)]),
           bump: m.bump.map(z => [r0(z.x), r0(z.y), z.r]), hole: m.hole.map(z => [r0(z.x), r0(z.y), z.r]),
           sw: sw ? [Math.round(sw.a * 1000) / 1000, r0(Math.min(SW_LEN, this.arenaR - 15))] : null,

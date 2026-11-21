@@ -58,6 +58,74 @@ addEventListener('resize', resize); resize();
 let ws = null, myId = 0, snaps = [], latest = null;
 const feed = [], parts = [], pops = [], trails = [], rings = [];
 const bumpFlash = {};
+// ---------- 테마 (판마다 방장이 고름: 밤 경기장 / 용암 / 우주 / 눈밭) ----------
+const THEME = {
+  night: { name: '밤 경기장', bg: '#0e1016', floor: '#1c2130', line: 'rgba(255,255,255,.04)', edge: BRAND, ghost: 'rgba(255,255,255,.08)', spark: '#fff', light: false },
+  lava: { name: '용암', bg: '#1c0905', floor: '#2b2422', line: 'rgba(255,140,70,.08)', edge: '#ff7a2f', ghost: 'rgba(255,120,50,.22)', spark: '#ffd9a0', light: false },
+  space: { name: '우주', bg: '#04050c', floor: '#1b2234', line: 'rgba(110,210,255,.10)', edge: '#3ec1ff', ghost: 'rgba(110,200,255,.16)', spark: '#dff6ff', light: false },
+  snow: { name: '눈밭', bg: '#0a2531', floor: '#cdd9e5', line: 'rgba(30,60,90,.10)', edge: '#ffffff', ghost: 'rgba(255,255,255,.18)', spark: '#2a3a4f', light: true },
+};
+let theme = THEME.night;
+const deco = { // 테마 장식용 고정 난수 (꾸밈이라 사람마다 조금 달라도 됨)
+  stars: Array.from({ length: 140 }, () => ({ x: Math.random(), y: Math.random(), s: Math.random() * 1.6 + .4, ph: Math.random() * 6.28 })),
+  flakes: Array.from({ length: 90 }, () => ({ x: Math.random(), y: Math.random(), r: Math.random() * 2 + 1, v: Math.random() * .04 + .03, ph: Math.random() * 6.28 })),
+  blobs: Array.from({ length: 7 }, () => ({ x: Math.random(), y: Math.random(), r: Math.random() * .18 + .12, ph: Math.random() * 6.28 })),
+  cracks: Array.from({ length: 9 }, () => {
+    const a = Math.random() * 6.28, d = Math.random() * 330; let x = Math.cos(a) * d, y = Math.sin(a) * d; const pts = [[x, y]];
+    for (let k = 0; k < 5; k++) { x += (Math.random() - .5) * 70; y += (Math.random() - .5) * 70; pts.push([x, y]); }
+    return pts;
+  }),
+  specks: Array.from({ length: 160 }, () => { const a = Math.random() * 6.28, d = Math.sqrt(Math.random()) * 420; return [Math.cos(a) * d, Math.sin(a) * d, Math.random() * 2.5 + 1]; }),
+};
+function drawBackdrop(now) { // 링 바깥 허공 (화면 좌표)
+  if (theme === THEME.space) { // 반짝이는 별
+    cx.fillStyle = '#fff';
+    for (const s of deco.stars) { cx.globalAlpha = .3 + .7 * (.5 + .5 * Math.sin(now / 700 + s.ph)); cx.fillRect(s.x * W, s.y * H, s.s, s.s); }
+    cx.globalAlpha = 1;
+  } else if (theme === THEME.lava) { // 꿈틀대는 용암 빛
+    for (const b of deco.blobs) {
+      const x = b.x * W + Math.sin(now / 2300 + b.ph) * 30, y = b.y * H + Math.cos(now / 1900 + b.ph) * 30, r = b.r * Math.max(W, H) * (1 + .08 * Math.sin(now / 900 + b.ph));
+      const g = cx.createRadialGradient(x, y, 0, x, y, r); g.addColorStop(0, 'rgba(255,110,30,.35)'); g.addColorStop(1, 'rgba(255,60,20,0)');
+      cx.fillStyle = g; cx.fillRect(x - r, y - r, r * 2, r * 2);
+    }
+  } else if (theme === THEME.snow) { // 차가운 물결
+    cx.strokeStyle = 'rgba(160,220,240,.12)'; cx.lineWidth = 2;
+    for (let k = 0; k < 14; k++) {
+      const y = ((k * 73 + now * .02) % (H + 40)) - 20;
+      cx.beginPath(); for (let x = 0; x <= W; x += 24) cx.lineTo(x, y + Math.sin(x / 60 + now / 900 + k) * 5); cx.stroke();
+    }
+  }
+}
+function drawFloorDeco(ar, now) { // 링 바닥 무늬 (월드 좌표, 링 안쪽만)
+  if (theme === THEME.night) return;
+  cx.save(); cx.beginPath(); cx.arc(0, 0, Math.max(0, ar), 0, 6.283); cx.clip();
+  if (theme === THEME.lava) { // 금 간 틈에서 새는 빛
+    cx.lineCap = 'round'; cx.lineJoin = 'round';
+    for (const pts of deco.cracks) {
+      cx.beginPath(); pts.forEach(([x, y], k) => k ? cx.lineTo(x, y) : cx.moveTo(x, y));
+      cx.strokeStyle = `rgba(255,120,40,${.35 + .2 * Math.sin(now / 600 + pts[0][0])})`; cx.lineWidth = 5; cx.stroke();
+      cx.strokeStyle = 'rgba(255,220,140,.5)'; cx.lineWidth = 1.5; cx.stroke();
+    }
+  } else if (theme === THEME.space) { // 금속 패널 이음새
+    cx.strokeStyle = 'rgba(110,210,255,.07)'; cx.lineWidth = 2; cx.beginPath();
+    for (let v = -420; v <= 420; v += 70) { cx.moveTo(v, -420); cx.lineTo(v, 420); cx.moveTo(-420, v); cx.lineTo(420, v); }
+    cx.stroke();
+    cx.fillStyle = 'rgba(110,210,255,.18)';
+    for (let v = -420; v <= 420; v += 70) for (let u = -420; u <= 420; u += 70) cx.fillRect(v - 2, u - 2, 4, 4);
+  } else if (theme === THEME.snow) { // 눈 결
+    cx.fillStyle = 'rgba(255,255,255,.55)';
+    for (const [x, y, r] of deco.specks) { cx.beginPath(); cx.arc(x, y, r, 0, 6.283); cx.fill(); }
+  }
+  cx.restore();
+}
+function drawSnowfall(now, dt) { // 눈밭: 화면 위로 내리는 눈
+  if (theme !== THEME.snow) return;
+  cx.fillStyle = 'rgba(255,255,255,.8)';
+  for (const f of deco.flakes) {
+    f.y += f.v * dt; if (f.y > 1.02) { f.y = -.02; f.x = Math.random(); }
+    cx.beginPath(); cx.arc((f.x + Math.sin(now / 1200 + f.ph) * .01) * W, f.y * H, f.r, 0, 6.283); cx.fill();
+  }
+}
 const KIND_NAME = { ice: '빙판 지대', bump: '범퍼 기둥', wind: '바람 지대', hole: '낙하 구멍', meteor: '운석 낙하', sweep: '회전 막대', bomb: '폭탄 돌리기', quake: '지진' };
 function burst(x, y, n, c, sMin, sMax, life) { for (let i = 0; i < n; i++) { const a = Math.random() * 6.283, s = sMin + Math.random() * (sMax - sMin); parts.push({ x, y, vx: Math.cos(a) * s, vy: Math.sin(a) * s, life, c }); } }
 let shake = 0, lastWin = '';
@@ -112,7 +180,7 @@ function onMsg(m) {
   if (m.t !== 'e') return;
   if (m.k === 'bump') {
     const n = Math.min(24, 4 + m.f / 40);
-    for (let i = 0; i < n; i++) { const a = Math.random() * 6.283, s = 80 + Math.random() * m.f * .5; parts.push({ x: m.x, y: m.y, vx: Math.cos(a) * s, vy: Math.sin(a) * s, life: .5, c: '#fff' }); }
+    for (let i = 0; i < n; i++) { const a = Math.random() * 6.283, s = 80 + Math.random() * m.f * .5; parts.push({ x: m.x, y: m.y, vx: Math.cos(a) * s, vy: Math.sin(a) * s, life: .5, c: theme.spark }); }
     shake = Math.max(shake, Math.min(18, m.f / 45));
     tone(140, .18, 'sine', Math.min(.5, .1 + m.f / 1500), 50); noise(.08, Math.min(.35, m.f / 2000));
   } else if (m.k === 'dash') {
@@ -416,17 +484,18 @@ function drawMap(mp, now, dt, ar) {
     cx.strokeStyle = 'rgba(255,90,95,.55)'; cx.lineWidth = 3; cx.setLineDash([8, 8]); cx.stroke(); cx.setLineDash([]);
   }
   for (const [x, y, r] of mp.ice || []) { // 빙판
-    cx.fillStyle = 'rgba(150,210,255,.18)'; cx.beginPath(); cx.arc(x, y, r, 0, 6.283); cx.fill();
-    cx.strokeStyle = 'rgba(190,230,255,.45)'; cx.lineWidth = 2; cx.stroke();
-    cx.strokeStyle = 'rgba(230,245,255,.35)'; cx.beginPath();
+    const L = theme.light;
+    cx.fillStyle = L ? 'rgba(80,160,230,.28)' : 'rgba(150,210,255,.18)'; cx.beginPath(); cx.arc(x, y, r, 0, 6.283); cx.fill();
+    cx.strokeStyle = L ? 'rgba(40,120,200,.65)' : 'rgba(190,230,255,.45)'; cx.lineWidth = 2; cx.stroke();
+    cx.strokeStyle = L ? 'rgba(255,255,255,.8)' : 'rgba(230,245,255,.35)'; cx.beginPath();
     for (let k = 0; k < 7; k++) { const a = k * .9 + .4, d = r * (.2 + (k % 3) * .22), px = x + Math.cos(a) * d, py = y + Math.sin(a) * d; cx.moveTo(px - 11, py - 4); cx.lineTo(px + 11, py + 4); }
     cx.stroke();
   }
   for (const [x, y, r, a] of mp.wind || []) { // 바람: 흐르는 화살표
-    cx.fillStyle = 'rgba(120,200,255,.07)'; cx.beginPath(); cx.arc(x, y, r, 0, 6.283); cx.fill();
-    cx.strokeStyle = 'rgba(120,200,255,.3)'; cx.lineWidth = 2; cx.setLineDash([6, 10]); cx.stroke(); cx.setLineDash([]);
+    cx.fillStyle = theme.light ? 'rgba(40,110,180,.10)' : 'rgba(120,200,255,.07)'; cx.beginPath(); cx.arc(x, y, r, 0, 6.283); cx.fill();
+    cx.strokeStyle = theme.light ? 'rgba(40,110,180,.45)' : 'rgba(120,200,255,.3)'; cx.lineWidth = 2; cx.setLineDash([6, 10]); cx.stroke(); cx.setLineDash([]);
     cx.save(); cx.beginPath(); cx.arc(x, y, r, 0, 6.283); cx.clip(); cx.translate(x, y); cx.rotate(a);
-    cx.strokeStyle = 'rgba(180,225,255,.55)'; cx.lineWidth = 4; cx.lineCap = 'round';
+    cx.strokeStyle = theme.light ? 'rgba(40,110,180,.6)' : 'rgba(180,225,255,.55)'; cx.lineWidth = 4; cx.lineCap = 'round';
     const off = (now * .15) % 60;
     for (let row = -2; row <= 2; row++) for (let col = -3; col <= 3; col++) {
       const px = col * 60 + off - 30, py = row * 45 + (col % 2) * 20;
@@ -517,6 +586,7 @@ function drawPowerup(u, now, sc) {
   cx.save(); cx.translate(u.x, u.y);
   cx.fillStyle = 'rgba(255,210,63,.18)'; cx.beginPath(); cx.arc(0, 0, R + 9, 0, 6.283); cx.fill();
   cx.fillStyle = BRAND; cx.beginPath(); cx.arc(0, 0, R, 0, 6.283); cx.fill();
+  cx.strokeStyle = 'rgba(0,0,0,.35)'; cx.lineWidth = 2; cx.stroke();
   cx.strokeStyle = '#1a1400'; cx.fillStyle = '#1a1400'; cx.lineWidth = 3; cx.lineCap = 'round';
   if (u.k === 'big') { // 바깥쪽 화살표 4개 = 커진다
     for (let k = 0; k < 4; k++) {
@@ -546,7 +616,8 @@ function drawHUD(st, now) {
   else if (st.ph === 'countdown') {
     big = String(Math.max(1, Math.ceil(st.pt)));
     const ks = (st.mp && st.mp.k || []).map(k => KIND_NAME[k]).filter(Boolean);
-    small = ks.length ? '이번 판: ' + ks.join(' · ') : '링 밖으로 밀어내세요!';
+    const th = st.mp && THEME[st.mp.th];
+    small = ks.length ? '이번 판: ' + [th ? th.name : '', ...ks].filter(Boolean).join(' · ') : '링 밖으로 밀어내세요!';
   }
   else if (st.ph === 'playing') {
     big = `남은 사람 ${alive}명`;
@@ -629,8 +700,10 @@ function frame(now) {
   const k = Math.exp(-10 * dt); offX *= k; offY *= k;
   renderDelay += (targetDelay() - renderDelay) * Math.min(1, dt * 2);
   cx.setTransform(DPR, 0, 0, DPR, 0, 0);
-  cx.fillStyle = '#0e1016'; cx.fillRect(0, 0, W, H);
   const st = withPrediction(interp(now));
+  theme = (st && st.mp && THEME[st.mp.th]) || THEME.night;
+  cx.fillStyle = theme.bg; cx.fillRect(0, 0, W, H);
+  drawBackdrop(now);
   if (st) {
     const topPad = narrow ? 112 + 30 + st.p.length * 24 + 14 : 76, botPad = narrow ? (isTouch ? 100 : 16) : 12, avail = H - topPad - botPad;
     const sc = Math.min(W - 24, avail) / (ARENA_R0 * 2 + 40);
@@ -638,16 +711,19 @@ function frame(now) {
     const sx = (Math.random() - .5) * shake, sy = (Math.random() - .5) * shake;
     cx.save(); cx.translate(W / 2 + sx, topPad + avail / 2 + sy); cx.scale(sc, sc);
     // 원래 링 자리 (무너진 영역)
-    cx.setLineDash([10, 14]); cx.strokeStyle = 'rgba(255,255,255,.08)'; cx.lineWidth = 3;
+    cx.setLineDash([10, 14]); cx.strokeStyle = theme.ghost; cx.lineWidth = 3;
     cx.beginPath(); cx.arc(0, 0, ARENA_R0, 0, 6.283); cx.stroke(); cx.setLineDash([]);
     // 링
     const ar = st.ar;
-    cx.fillStyle = '#1c2130'; cx.beginPath(); cx.arc(0, 0, ar, 0, 6.283); cx.fill();
-    cx.strokeStyle = 'rgba(255,255,255,.04)'; cx.lineWidth = 2;
+    cx.fillStyle = theme.floor; cx.beginPath(); cx.arc(0, 0, Math.max(0, ar), 0, 6.283); cx.fill();
+    drawFloorDeco(ar, now);
+    cx.strokeStyle = theme.line; cx.lineWidth = 2;
     for (let r = 60; r < ar; r += 60) { cx.beginPath(); cx.arc(0, 0, r, 0, 6.283); cx.stroke(); }
     const shrinking = st.ph === 'playing' && ar < ARENA_R0 - 2 && (ar > 152 || ar < 148);
-    cx.strokeStyle = shrinking && Math.floor(now / 250) % 2 ? '#ff5a5f' : BRAND; cx.lineWidth = 6;
-    cx.beginPath(); cx.arc(0, 0, ar, 0, 6.283); cx.stroke();
+    const edgeCol = shrinking && Math.floor(now / 250) % 2 ? '#ff5a5f' : theme.edge;
+    if (theme !== THEME.night) { cx.globalAlpha = .25; cx.strokeStyle = edgeCol; cx.lineWidth = 18; cx.beginPath(); cx.arc(0, 0, Math.max(0, ar), 0, 6.283); cx.stroke(); cx.globalAlpha = 1; } // 테두리 빛
+    cx.strokeStyle = edgeCol; cx.lineWidth = 6;
+    cx.beginPath(); cx.arc(0, 0, Math.max(0, ar), 0, 6.283); cx.stroke();
     // 필드·위험 요소
     curBomb = st.mp && st.mp.bomb;
     drawMap(st.mp, now, dt, ar);
@@ -691,6 +767,7 @@ function frame(now) {
     }
     cx.globalAlpha = 1;
     cx.restore();
+    drawSnowfall(now, dt);
     drawHUD(st, now);
   } else if (ws) {
     cx.fillStyle = '#8b92a3'; cx.font = '500 15px -apple-system,sans-serif'; cx.textAlign = 'center'; cx.fillText('연결 중…', W / 2, H / 2);
