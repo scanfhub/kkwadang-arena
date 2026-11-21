@@ -443,7 +443,7 @@ function drawHUD(st, now) {
   else if (st.ph === 'countdown') { big = String(Math.max(1, Math.ceil(st.pt))); small = '링 밖으로 밀어내세요!'; }
   else if (st.ph === 'playing') {
     big = `남은 사람 ${alive}명`;
-    small = st.ar < ARENA_R0 - 2 ? '링이 줄어드는 중' : '대시(Space)로 박치기';
+    small = st.ar < 148 ? '서든데스 — 링이 끝까지 줄어듭니다' : st.ar < ARENA_R0 - 2 ? '링이 줄어드는 중' : '대시(Space)로 박치기';
     if (me && me.s === 2) small = '탈락 — 다음 라운드를 기다리는 중';
   } else if (st.ph === 'roundover') {
     big = lastWin ? `${lastWin} 승리!` : '무승부';
@@ -533,7 +533,7 @@ function frame(now) {
     cx.fillStyle = '#1c2130'; cx.beginPath(); cx.arc(0, 0, ar, 0, 6.283); cx.fill();
     cx.strokeStyle = 'rgba(255,255,255,.04)'; cx.lineWidth = 2;
     for (let r = 60; r < ar; r += 60) { cx.beginPath(); cx.arc(0, 0, r, 0, 6.283); cx.stroke(); }
-    const shrinking = st.ph === 'playing' && ar < ARENA_R0 - 2 && ar > 152;
+    const shrinking = st.ph === 'playing' && ar < ARENA_R0 - 2 && (ar > 152 || ar < 148);
     cx.strokeStyle = shrinking && Math.floor(now / 250) % 2 ? '#ff5a5f' : BRAND; cx.lineWidth = 6;
     cx.beginPath(); cx.arc(0, 0, ar, 0, 6.283); cx.stroke();
     // 파워업

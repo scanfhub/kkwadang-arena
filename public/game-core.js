@@ -3,6 +3,7 @@
 const TICK = 60, DT = 1 / TICK, SEND_EVERY = 2;
 const ARENA_R0 = 420, ARENA_MIN = 150;
 const SHRINK_DELAY = 6, SHRINK_TIME = 35;
+const SUDDEN_DELAY = 8, SUDDEN_TIME = 12; // 서든데스: 최소 링에서 8초 지나면 12초 동안 0까지 줄어 라운드가 반드시 끝남
 const PR = 24, BIG_R = 40;
 const ACC = 1500, FRICTION = 4;
 const DASH_SPEED = 820, DASH_CD = 1.4, DASH_TIME = 0.22, DASH_STEPS = Math.round(DASH_CD * TICK);
@@ -114,6 +115,8 @@ class Sim {
         const k = Math.min(1, (this.roundT - SHRINK_DELAY) / SHRINK_TIME);
         this.arenaR = ARENA_R0 - (ARENA_R0 - ARENA_MIN) * k;
       }
+      const sd = this.roundT - SHRINK_DELAY - SHRINK_TIME - SUDDEN_DELAY;
+      if (sd > 0) this.arenaR = ARENA_MIN * Math.max(0, 1 - sd / SUDDEN_TIME);
       if (this.roundT > this.nextPowerAt && this.powerups.length < 2) {
         const a = Math.random() * Math.PI * 2, d = Math.random() * this.arenaR * 0.65;
         this.powerups.push({ i: this.nextPuId++, k: Math.random() < 0.5 ? 'big' : 'boom', x: Math.cos(a) * d, y: Math.sin(a) * d });
