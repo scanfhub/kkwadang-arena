@@ -1,0 +1,37 @@
+// 봇 3명이 실제 서버에 접속해 서로 박치기하며 라운드가 끝까지 도는지 확인
+const WebSocket = require('ws');
+const URL = process.argv[2] || 'ws://localhost:3000';
+const log = []; const phases = new Set(); let wins = [], falls = 0, bumps = 0, lastState = null;
+function bot(name) {
+  const ws = new WebSocket(URL); let id = 0;
+  ws.on('open', () => ws.send(JSON.stringify({ t: 'join', name })));
+  ws.on('message', raw => {
+    const m = JSON.parse(raw);
+    if (m.t === 'welcome') id = m.id;
+    if (m.t === 's' && id) {
+      if (name === 'bot1') { phases.add(m.ph); lastState = m; }
+      const me = m.p.find(p => p.i === id), others = m.p.filter(p => p.i !== id && p.s === 0);
+      if (!me || me.s !== 0 || !others.length) return;
+      const t = others[0], dx = t.x - me.x, dy = t.y - me.y, l = Math.hypot(dx, dy) || 1;
+      ws.send(JSON.stringify({ t: 'in', x: dx / l, y: dy / l, d: l < 120 && Math.random() < .3 ? 1 : 0 }));
+    }
+    if (m.t === 'e' && name === 'bot1') {
+      if (m.k === 'win') wins.push(m.n || '(무승부)');
+      if (m.k === 'fall') falls++;
+      if (m.k === 'bump') bumps++;
+    }
+  });
+  return ws;
+}
+const bots = ['bot1', 'bot2', 'bot3'].map(bot);
+const start = Date.now();
+const iv = setInterval(() => {
+  if (wins.length >= (+process.argv[3] || 2) || Date.now() - start > 90000) {
+    clearInterval(iv); bots.forEach(b => b.close());
+    console.log('phases seen:', [...phases].join(','));
+    console.log('bumps:', bumps, 'falls:', falls, 'wins:', wins.join(' / '));
+    console.log('scores:', lastState.p.map(p => `${p.n}=${p.sc}승 ${p.ko}떨굼`).join(', '));
+    console.log('elapsed:', ((Date.now() - start) / 1000).toFixed(1) + 's');
+    process.exit(0);
+  }
+}, 200);
